@@ -43,6 +43,19 @@ async function loadClassrooms() {
     const data = await response.json();
     if (!data.ok || !data.classrooms.length) throw new Error(data.error || "No classrooms available.");
     classroomSelect.innerHTML = data.classrooms.map((c) => `<option value="${c.id}">${c.label}</option>`).join("");
+
+    // Arriving via a teacher's QR code — the link encodes the classroom so
+    // there's nothing to pick.
+    const qsClassroom = new URLSearchParams(window.location.search).get("classroom");
+    const match = data.classrooms.find((c) => c.id === qsClassroom);
+    if (match) {
+      classroomSelect.value = match.id;
+      classroomSelect.disabled = true;
+      const note = document.createElement("p");
+      note.className = "muted";
+      note.textContent = `Enrolling into ${match.label} (from your teacher's QR code).`;
+      classroomSelect.closest("label").after(note);
+    }
   } catch (err) {
     statusEl.textContent = "Couldn't load classrooms: " + err.message;
     statusEl.classList.add("error");

@@ -10,8 +10,17 @@ huggingface_hub
 torch
 torchvision
 imageio-ffmpeg
+qrcode[pil]
+scipy
+deepface
+onnxruntime
 
 # Note: heavy ML packages (torch, torchvision, insightface, ultralytics)
 # may require specific wheels or system libraries and can fail on
 # ephemeral platforms. Consider using a Dockerfile or deploying to
 # a VM for reliable builds.
+#
+# deepface pulls in tensorflow, which only ships wheels for Python 3.9-3.12 —
+# it will fail to resolve on newer local interpreters (e.g. 3.13/3.14). The
+# Dockerfile uses python:3.10-slim, where this installs cleanly; for a raw
+# local venv, make sure it's created with Python 3.10-3.12.

@@ -164,6 +164,34 @@ classroomSelect.addEventListener("change", async () => {
   updateRosterClassroomLabel();
   markResult.classList.add("hidden");
   await refreshAttendanceSummary();
+  if (!enrollQrPanel.classList.contains("hidden")) await loadEnrollQr();
+});
+
+// ── Attendance tab: enrollment QR (students join via cloudflared tunnel) ────
+const enrollQrToggle = document.getElementById("enroll-qr-toggle");
+const enrollQrPanel  = document.getElementById("enroll-qr-panel");
+const enrollQrBody   = document.getElementById("enroll-qr-body");
+
+async function loadEnrollQr() {
+  enrollQrBody.innerHTML = `<p class="muted">Loading...</p>`;
+  try {
+    const response = await fetch(`/api/enroll-url?classroom=${encodeURIComponent(currentClassroomId)}`);
+    const data = await response.json();
+    if (!response.ok || !data.ok) throw new Error(data.error || "No enrollment session running.");
+    enrollQrBody.innerHTML = `
+      <img class="enroll-qr-image" src="/api/enroll-qr?classroom=${encodeURIComponent(currentClassroomId)}&t=${Date.now()}" alt="Enrollment QR code" />
+      <p class="enroll-qr-link">${data.url}</p>
+      <p class="muted">Students scan this to enroll themselves into ${classroomSelect.options[classroomSelect.selectedIndex]?.textContent || "this classroom"} — no Wi-Fi match needed, works over their own mobile data.</p>`;
+  } catch (err) {
+    enrollQrBody.innerHTML = `<p class="muted">${err.message} Start it with <code>python start_enrollment_session.py</code> on this laptop, then reopen this panel.</p>`;
+  }
+}
+
+enrollQrToggle.addEventListener("click", async () => {
+  const opening = enrollQrPanel.classList.contains("hidden");
+  enrollQrPanel.classList.toggle("hidden", !opening);
+  enrollQrToggle.textContent = opening ? "Hide enrollment QR" : "Show enrollment QR";
+  if (opening) await loadEnrollQr();
 });
 
 // ── Enroll Student tab: its own independent classroom picker ────────────────
@@ -202,7 +230,7 @@ const classroomPhotoInput = document.getElementById("classroom-photo-input");
 const classroomPhotoLabel = document.getElementById("classroom-photo-label");
 const markStatus        = document.getElementById("mark-status");
 const markResult        = document.getElementById("mark-result");
-const markedPhotoPreview= document.getElementById("marked-photo-preview");
+const markedPhotoGallery = document.getElementById("marked-photo-gallery");
 const presentList       = document.getElementById("present-list");
 const suspiciousList    = document.getElementById("suspicious-list");
 const absentList        = document.getElementById("absent-list");
@@ -289,19 +317,21 @@ enrollForm.addEventListener("submit", async (event) => {
 
 markForm.addEventListener("submit", async (event) => {
   event.preventDefault();
-  if (!classroomPhotoInput.files.length) { markStatus.textContent = "Upload a classroom photo first."; markStatus.classList.add("error"); return; }
+  if (!classroomPhotoInput.files.length) { markStatus.textContent = "Upload at least one classroom photo first."; markStatus.classList.add("error"); return; }
   const btn = markForm.querySelector("button[type='submit']");
   const payload = new FormData();
   payload.append("classroom", currentClassroomId);
-  payload.append("photo", classroomPhotoInput.files[0]);
+  Array.from(classroomPhotoInput.files).forEach((f) => payload.append("photos", f));
   markStatus.classList.remove("error");
-  markStatus.textContent = "Detecting faces and marking attendance...";
+  markStatus.textContent = classroomPhotoInput.files.length > 1
+    ? `Detecting faces across ${classroomPhotoInput.files.length} photos and marking attendance...`
+    : "Detecting faces and marking attendance...";
   btn.disabled = true;
   try {
     const response = await fetch("/api/attendance/mark", { method: "POST", body: payload });
     const data = await response.json();
     if (!response.ok || !data.ok) throw new Error(data.error || "Attendance marking failed.");
-    renderMarkedPhoto(data.marked_url);
+    renderMarkedPhotos(data.photos || []);
     renderAttendanceBuckets(data.present || [], data.suspicious || [], data.absent || [], data.unknown_faces || 0, data.unknown_faces_detail || []);
     renderRoster(data.roster || []);
     markStatus.textContent = `${data.present.length} present, ${data.suspicious.length} suspicious, ${data.absent.length} absent.`;
@@ -315,7 +345,7 @@ markForm.addEventListener("submit", async (event) => {
 document.getElementById("demo-preview-btn").addEventListener("click", () => {
   markStatus.classList.remove("error");
   markStatus.textContent = "Demo classroom photo — original, no annotations.";
-  markedPhotoPreview.src = "/static/demo_classroom.jpg";
+  markedPhotoGallery.innerHTML = `<img class="marked-photo-preview" src="/static/demo_classroom.jpg" alt="Demo classroom photo" />`;
   markResult.classList.remove("hidden");
   presentList.innerHTML = "";
   suspiciousList.innerHTML = "";
@@ -330,7 +360,7 @@ document.getElementById("demo-btn").addEventListener("click", async () => {
 
   // Step 1 — show original unannotated image immediately
   markResult.classList.remove("hidden");
-  markedPhotoPreview.src = "/static/demo_classroom.jpg";
+  markedPhotoGallery.innerHTML = `<img class="marked-photo-preview" src="/static/demo_classroom.jpg" alt="Demo classroom photo" />`;
   markStatus.textContent = "Here's the demo classroom photo. Running attendance pipeline...";
 
   // Step 2 — run the pipeline
@@ -338,7 +368,7 @@ document.getElementById("demo-btn").addEventListener("click", async () => {
     const response = await fetch(`/api/attendance/demo?classroom=${encodeURIComponent(currentClassroomId)}`, { method: "POST" });
     const data = await response.json();
     if (!response.ok || !data.ok) throw new Error(data.error || "Demo failed.");
-    renderMarkedPhoto(data.marked_url);
+    renderMarkedPhotos([{ marked_url: data.marked_url, clean_url: data.clean_url }]);
     renderAttendanceBuckets(data.present || [], data.suspicious || [], data.absent || [], data.unknown_faces || 0, data.unknown_faces_detail || []);
     renderRoster(data.roster || []);
     markStatus.textContent = `Demo complete — ${data.present.length} present, ${data.suspicious.length} suspicious, ${data.absent.length} absent.`;
@@ -365,10 +395,14 @@ function renderEnrollmentResult(student, mediaSamples) {
     <div class="result-detail">${mediaSamples.map((s) => `${s.file_name} (${s.frame_samples} frames)`).join(", ")}</div>`;
 }
 
-function renderMarkedPhoto(url) {
-  if (!url) { markResult.classList.add("hidden"); return; }
+function renderMarkedPhotos(photos) {
+  if (!photos || !photos.length) { markResult.classList.add("hidden"); return; }
   markResult.classList.remove("hidden");
-  markedPhotoPreview.src = url;
+  markedPhotoGallery.innerHTML = photos
+    .map((p, i) => `<img class="marked-photo-preview" data-photo-index="${i}" src="${p.marked_url}" alt="Marked classroom photo ${i + 1}" />`)
+    .join("");
+  currentCleanPhotoUrls = photos.map((p) => p.clean_url);
+  cleanPhotoImageCache = {};
 }
 
 const unknownFacesToggle = document.getElementById("unknown-faces-toggle");
@@ -376,18 +410,33 @@ const unknownFacesGrid   = document.getElementById("unknown-faces-grid");
 let currentUnknownFaces  = [];
 let unknownFacesExpanded = false;
 
+let currentPresentFaces = [];
+
 function renderAttendanceBuckets(present, suspicious, absent, unknownFaces, unknownFacesDetail) {
+  currentPresentFaces = present.map((e) => ({ bbox: e.bbox, photoIndex: e.photo_index ?? 0 }));
   presentList.innerHTML = `<h3>Present (${present.length})</h3>
     ${present.length
-      ? present.map((e) => `<div class="result-item present-item"><strong>${e.student.name}</strong><span>Confidence ${formatNumber(e.confidence)}</span></div>`).join("")
+      ? present.map((e, i) => `
+        <div class="result-item present-item">
+          <div class="present-item-row">
+            <strong>${e.student.name}</strong>
+            <span>Confidence ${formatNumber(e.confidence)}</span>
+            <button type="button" class="show-face-btn" data-face-index="${i}">Show face</button>
+          </div>
+          <div class="face-reveal hidden" data-face-slot="${i}"></div>
+        </div>`).join("")
       : '<div class="result-item muted">No students confidently recognized.</div>'}`;
 
   suspiciousList.innerHTML = `<h3>Suspicious (${suspicious.length})</h3>
     ${suspicious.length
       ? suspicious.map((e) => `
-        <div class="result-item suspicious-item" data-review-id="${e.review_id}">
-          <strong>${e.student.name}</strong>
-          <span>Confidence ${formatNumber(e.confidence)} — please verify</span>
+        <div class="result-item suspicious-item" data-review-id="${e.review_id}" data-bbox='${JSON.stringify(e.bbox)}' data-photo-index="${e.photo_index ?? 0}">
+          <div class="present-item-row">
+            <strong>${e.student.name}</strong>
+            <span>Confidence ${formatNumber(e.confidence)} — please verify</span>
+            <button type="button" class="show-face-btn">Show face</button>
+          </div>
+          <div class="face-reveal hidden"></div>
           <div class="suspicious-actions">
             <button type="button" class="suspicious-btn suspicious-confirm-btn" data-review-id="${e.review_id}">Yes, it's them</button>
             <button type="button" class="suspicious-btn suspicious-reject-btn" data-review-id="${e.review_id}">Not them</button>
@@ -413,11 +462,108 @@ function renderAttendanceBuckets(present, suspicious, absent, unknownFaces, unkn
   }
 }
 
+function addToAbsentList(name) {
+  if ([...absentList.querySelectorAll(".absent-item strong")].some((el) => el.textContent === name)) return;
+  const muted = absentList.querySelector(".muted");
+  if (muted) muted.remove();
+  absentList.insertAdjacentHTML("beforeend", `<div class="result-item absent-item"><strong>${name}</strong></div>`);
+  const h3 = absentList.querySelector("h3");
+  if (h3) h3.textContent = `Absent (${absentList.querySelectorAll(".absent-item").length})`;
+}
+
+function removeFromAbsentList(name) {
+  const match = [...absentList.querySelectorAll(".absent-item")].find((el) => el.querySelector("strong")?.textContent === name);
+  if (match) match.remove();
+  const count = absentList.querySelectorAll(".absent-item").length;
+  const h3 = absentList.querySelector("h3");
+  if (h3) h3.textContent = `Absent (${count})`;
+  if (count === 0 && !absentList.querySelector(".muted")) {
+    absentList.insertAdjacentHTML("beforeend", '<div class="result-item muted">Everyone enrolled was seen.</div>');
+  }
+}
+
+function addPresentEntry(student, confidence, bbox, photoIndex) {
+  const muted = presentList.querySelector(".muted");
+  if (muted) muted.remove();
+  const index = currentPresentFaces.length;
+  currentPresentFaces.push({ bbox, photoIndex: photoIndex ?? 0 });
+  presentList.insertAdjacentHTML("beforeend", `
+    <div class="result-item present-item">
+      <div class="present-item-row">
+        <strong>${student.name}</strong>
+        <span>Confidence ${formatNumber(confidence)}</span>
+        <button type="button" class="show-face-btn" data-face-index="${index}">Show face</button>
+      </div>
+      <div class="face-reveal hidden" data-face-slot="${index}"></div>
+    </div>`);
+  const h3 = presentList.querySelector("h3");
+  if (h3) h3.textContent = `Present (${presentList.querySelectorAll(".present-item").length})`;
+}
+
+function addSuspiciousEntry(newSuspicious) {
+  const muted = suspiciousList.querySelector(".muted");
+  if (muted) muted.remove();
+  suspiciousList.insertAdjacentHTML("beforeend", `
+    <div class="result-item suspicious-item" data-review-id="${newSuspicious.review_id}" data-bbox='${JSON.stringify(newSuspicious.bbox)}' data-photo-index="${newSuspicious.photo_index ?? 0}">
+      <div class="present-item-row">
+        <strong>${newSuspicious.student.name}</strong>
+        <span>Confidence ${formatNumber(newSuspicious.confidence)} — please verify</span>
+        <button type="button" class="show-face-btn">Show face</button>
+      </div>
+      <div class="face-reveal hidden"></div>
+      <div class="suspicious-actions">
+        <button type="button" class="suspicious-btn suspicious-confirm-btn" data-review-id="${newSuspicious.review_id}">Yes, it's them</button>
+        <button type="button" class="suspicious-btn suspicious-reject-btn" data-review-id="${newSuspicious.review_id}">Not them</button>
+      </div>
+    </div>`);
+  const h3 = suspiciousList.querySelector("h3");
+  if (h3) h3.textContent = `Suspicious (${suspiciousList.querySelectorAll(".suspicious-item").length})`;
+}
+
+async function addUnknownEntry(newUnknown) {
+  currentUnknownFaces.push({
+    bbox: newUnknown.bbox,
+    similarity: newUnknown.similarity,
+    photo_index: newUnknown.photo_index,
+    review_id: newUnknown.review_id,
+  });
+  unknownFacesToggle.classList.remove("hidden");
+  unknownFacesToggle.textContent = unknownFacesExpanded
+    ? `Hide unknown faces (${currentUnknownFaces.length})`
+    : `Show unknown faces (${currentUnknownFaces.length})`;
+  if (unknownFacesExpanded) await renderUnknownFacesGrid();
+}
+
 // Confirming reinforces the model: the embedding that triggered the suspicious
 // match gets added to that student's gallery (same as an automatic high-
-// confidence match would). Rejecting just discards it — nothing is learned
-// from a match the teacher says is wrong.
+// confidence match would). Rejecting doesn't just discard the face — it gets
+// re-matched against the roster excluding the rejected student, and lands in
+// Present/Suspicious/Unknown depending on what that re-match finds, while the
+// wrongly-suggested student drops to Absent (unless seen elsewhere).
 suspiciousList.addEventListener("click", async (event) => {
+  const showBtn = event.target.closest(".show-face-btn");
+  if (showBtn) {
+    const item = showBtn.closest(".suspicious-item");
+    const bbox = JSON.parse(item.dataset.bbox);
+    const photoIndex = Number(item.dataset.photoIndex || 0);
+    const slot = item.querySelector(".face-reveal");
+    if (!slot.querySelector("img")) {
+      try {
+        const dataUrl = cropFaceThumbnail(imageAsCanvas(await getCleanPhotoImage(photoIndex)), bbox);
+        slot.innerHTML = `<img src="${dataUrl}" alt="Face of suspicious match" />`;
+      } catch (err) {
+        slot.innerHTML = `<span class="muted">${err.message}</span>`;
+        slot.classList.remove("hidden");
+        showBtn.textContent = "Hide face";
+        return;
+      }
+    }
+    const wasVisible = !slot.classList.contains("hidden");
+    slot.classList.toggle("hidden", wasVisible);
+    showBtn.textContent = wasVisible ? "Show face" : "Hide face";
+    return;
+  }
+
   const confirmBtn = event.target.closest(".suspicious-confirm-btn");
   const rejectBtn  = event.target.closest(".suspicious-reject-btn");
   const btn = confirmBtn || rejectBtn;
@@ -440,10 +586,28 @@ suspiciousList.addEventListener("click", async (event) => {
 
     item.classList.remove("suspicious-item");
     item.classList.add(confirmed ? "present-item" : "absent-item");
-    item.innerHTML = confirmed
-      ? `<strong>${name}</strong><span>Confirmed — added to their gallery.</span>`
-      : `<strong>${name}</strong><span>Marked as not them.</span>`;
-    if (confirmed) await refreshAttendanceSummary();
+
+    if (confirmed) {
+      item.innerHTML = `<strong>${name}</strong><span>Confirmed — added to their gallery.</span>`;
+      await refreshAttendanceSummary();
+      return;
+    }
+
+    item.innerHTML = `<strong>${name}</strong><span>Not them — re-checked against the rest of the roster.</span>`;
+
+    const stillPresent = [...presentList.querySelectorAll(".present-item strong")].some((el) => el.textContent === name);
+    if (!stillPresent) addToAbsentList(name);
+
+    if (data.outcome === "present" && data.new_match) {
+      addPresentEntry(data.new_match.student, data.new_match.confidence, data.new_match.bbox, data.new_match.photo_index);
+      removeFromAbsentList(data.new_match.student.name);
+    } else if (data.outcome === "suspicious" && data.new_suspicious) {
+      addSuspiciousEntry(data.new_suspicious);
+    } else if (data.outcome === "unknown" && data.new_unknown) {
+      await addUnknownEntry(data.new_unknown);
+    }
+
+    await refreshAttendanceSummary();
   } catch (err) {
     alert(err.message);
     item.querySelectorAll("button").forEach((b) => (b.disabled = false));
@@ -458,61 +622,166 @@ function hideUnknownFacesUI() {
   unknownFacesGrid.innerHTML = "";
 }
 
-function cropUnknownFaceThumbnails(imgEl, faces, pad = 26, outSize = 220) {
+function cropFaceThumbnail(sourceCanvas, bbox, pad = 26, outSize = 220) {
+  const [x1, y1, x2, y2] = bbox;
+  const px1 = Math.max(0, x1 - pad);
+  const py1 = Math.max(0, y1 - pad);
+  const px2 = Math.min(sourceCanvas.width, x2 + pad);
+  const py2 = Math.min(sourceCanvas.height, y2 + pad);
+  const pw = Math.max(1, px2 - px1);
+  const ph = Math.max(1, py2 - py1);
+
+  const out = document.createElement("canvas");
+  const scale = Math.max(outSize / pw, outSize / ph);
+  out.width = Math.round(pw * scale);
+  out.height = Math.round(ph * scale);
+  const octx = out.getContext("2d");
+  octx.imageSmoothingQuality = "high";
+  octx.drawImage(sourceCanvas, px1, py1, pw, ph, 0, 0, out.width, out.height);
+  return out.toDataURL("image/jpeg", 0.88);
+}
+
+function imageAsCanvas(imgEl) {
   const source = document.createElement("canvas");
   source.width = imgEl.naturalWidth;
   source.height = imgEl.naturalHeight;
-  const sctx = source.getContext("2d");
-  sctx.drawImage(imgEl, 0, 0);
+  source.getContext("2d").drawImage(imgEl, 0, 0);
+  return source;
+}
 
-  return faces.map(({ bbox, similarity }) => {
-    const [x1, y1, x2, y2] = bbox;
-    const px1 = Math.max(0, x1 - pad);
-    const py1 = Math.max(0, y1 - pad);
-    const px2 = Math.min(source.width, x2 + pad);
-    const py2 = Math.min(source.height, y2 + pad);
-    const pw = Math.max(1, px2 - px1);
-    const ph = Math.max(1, py2 - py1);
+// Face crops (Present "Show face", unknown-faces grid) are cropped from the
+// pre-annotation photo, not the boxed/labelled preview — otherwise the
+// revealed face would have a bounding-box border and confidence text drawn
+// across it. With multiple photos per mark, each face crop has to come from
+// the specific photo it was detected in — indexed by photo_index. Cached
+// per index so repeated crops don't re-fetch/re-decode.
+let currentCleanPhotoUrls = []; // clean_url per photo, indexed by photo_index
+let cleanPhotoImageCache = {};  // { [photoIndex]: { url, img } }
 
-    const out = document.createElement("canvas");
-    const scale = Math.max(outSize / pw, outSize / ph);
-    out.width = Math.round(pw * scale);
-    out.height = Math.round(ph * scale);
-    const octx = out.getContext("2d");
-    octx.imageSmoothingQuality = "high";
-    octx.drawImage(source, px1, py1, pw, ph, 0, 0, out.width, out.height);
-    return { dataUrl: out.toDataURL("image/jpeg", 0.88), similarity };
+function getCleanPhotoImage(photoIndex = 0) {
+  return new Promise((resolve, reject) => {
+    const url = currentCleanPhotoUrls[photoIndex];
+    if (!url) { reject(new Error("No photo loaded yet.")); return; }
+    const cached = cleanPhotoImageCache[photoIndex];
+    if (cached && cached.url === url) {
+      resolve(cached.img);
+      return;
+    }
+    const img = new Image();
+    img.onload = () => {
+      cleanPhotoImageCache[photoIndex] = { url, img };
+      resolve(img);
+    };
+    img.onerror = () => reject(new Error("Could not load photo for cropping."));
+    img.src = url;
   });
 }
 
-function renderUnknownFacesGrid() {
-  const thumbs = cropUnknownFaceThumbnails(markedPhotoPreview, currentUnknownFaces);
+async function cropUnknownFaceThumbnails(faces, pad = 26, outSize = 220) {
+  const results = [];
+  for (const { bbox, similarity, photo_index, review_id } of faces) {
+    const source = imageAsCanvas(await getCleanPhotoImage(photo_index ?? 0));
+    results.push({ dataUrl: cropFaceThumbnail(source, bbox, pad, outSize), similarity, reviewId: review_id });
+  }
+  return results;
+}
+
+// Present faces stay hidden by default (privacy) — a "Show face" button
+// crops the face on demand from the already-rendered marked photo, the
+// same technique used for the unknown-faces grid.
+presentList.addEventListener("click", async (event) => {
+  const btn = event.target.closest(".show-face-btn");
+  if (!btn) return;
+  const index = Number(btn.dataset.faceIndex);
+  const face = currentPresentFaces[index];
+  const slot = presentList.querySelector(`.face-reveal[data-face-slot="${index}"]`);
+  if (!face || !slot) return;
+
+  if (!slot.querySelector("img")) {
+    try {
+      const dataUrl = cropFaceThumbnail(imageAsCanvas(await getCleanPhotoImage(face.photoIndex)), face.bbox);
+      slot.innerHTML = `<img src="${dataUrl}" alt="Face of recognized student" />`;
+    } catch (err) {
+      slot.innerHTML = `<span class="muted">${err.message}</span>`;
+      slot.classList.remove("hidden");
+      btn.textContent = "Hide face";
+      return;
+    }
+  }
+  const wasVisible = !slot.classList.contains("hidden");
+  slot.classList.toggle("hidden", wasVisible);
+  btn.textContent = wasVisible ? "Show face" : "Hide face";
+});
+
+async function renderUnknownFacesGrid() {
+  const thumbs = await cropUnknownFaceThumbnails(currentUnknownFaces);
   unknownFacesGrid.innerHTML = thumbs
     .map(
       (t) => `
-        <figure class="unknown-face-card">
+        <figure class="unknown-face-card" data-review-id="${t.reviewId ?? ""}">
           <img src="${t.dataUrl}" alt="Unrecognized face, similarity ${formatNumber(t.similarity)}" />
           <figcaption>Unknown &middot; ${formatNumber(t.similarity)}</figcaption>
+          ${t.reviewId ? `
+            <select class="assign-face-select">
+              <option value="">Assign to...</option>
+              ${currentRoster.map((s) => `<option value="${s.student_id}">${s.name}</option>`).join("")}
+            </select>` : ""}
         </figure>`
     )
     .join("");
 }
 
-unknownFacesToggle.addEventListener("click", () => {
+// A teacher identifying an unrecognized face as a specific enrolled student —
+// reinforces that student's gallery with this embedding and marks them
+// present, the same idea as confirming a suspicious match but for a face
+// that had no name candidate at all.
+unknownFacesGrid.addEventListener("change", async (event) => {
+  const select = event.target.closest(".assign-face-select");
+  if (!select) return;
+  const studentId = select.value;
+  if (!studentId) return;
+  const card = select.closest(".unknown-face-card");
+  const reviewId = card.dataset.reviewId;
+  const studentName = select.options[select.selectedIndex].textContent;
+  select.disabled = true;
+
+  try {
+    const response = await fetch("/api/attendance/unknown/assign", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ classroom: currentClassroomId, review_id: reviewId, student_id: studentId }),
+    });
+    const data = await response.json();
+    if (!response.ok || !data.ok) throw new Error(data.error || "Failed to assign.");
+    card.querySelector("figcaption").textContent = `Assigned to ${studentName}`;
+    select.remove();
+    await refreshAttendanceSummary();
+  } catch (err) {
+    alert(err.message);
+    select.disabled = false;
+  }
+});
+
+unknownFacesToggle.addEventListener("click", async () => {
   unknownFacesExpanded = !unknownFacesExpanded;
   if (unknownFacesExpanded) {
-    const build = () => renderUnknownFacesGrid();
-    if (markedPhotoPreview.complete && markedPhotoPreview.naturalWidth) build();
-    else markedPhotoPreview.addEventListener("load", build, { once: true });
     unknownFacesGrid.classList.remove("hidden");
     unknownFacesToggle.textContent = `Hide unknown faces (${currentUnknownFaces.length})`;
+    try {
+      await renderUnknownFacesGrid();
+    } catch (err) {
+      unknownFacesGrid.innerHTML = `<div class="result-item muted">${err.message}</div>`;
+    }
   } else {
     unknownFacesGrid.classList.add("hidden");
     unknownFacesToggle.textContent = `Show unknown faces (${currentUnknownFaces.length})`;
   }
 });
 
+let currentRoster = [];
+
 function renderRoster(students) {
+  currentRoster = students || [];
   if (!students.length) { rosterList.innerHTML = '<div class="result-item muted">No students enrolled yet.</div>'; return; }
   rosterList.innerHTML = students.map((s) => `
     <div class="roster-item" data-student-id="${s.student_id}">
@@ -544,7 +813,12 @@ rosterList.addEventListener("click", async (event) => {
 const lightbox      = document.getElementById("photo-lightbox");
 const lightboxImg   = document.getElementById("lightbox-img");
 const lightboxClose = document.getElementById("lightbox-close");
-markedPhotoPreview.addEventListener("click", () => { lightboxImg.src = markedPhotoPreview.src; lightbox.classList.remove("hidden"); });
+markedPhotoGallery.addEventListener("click", (event) => {
+  const img = event.target.closest(".marked-photo-preview");
+  if (!img) return;
+  lightboxImg.src = img.src;
+  lightbox.classList.remove("hidden");
+});
 lightboxClose.addEventListener("click", () => lightbox.classList.add("hidden"));
 lightbox.addEventListener("click", (e) => { if (e.target === lightbox) lightbox.classList.add("hidden"); });
 document.addEventListener("keydown", (e) => { if (e.key === "Escape") lightbox.classList.add("hidden"); });

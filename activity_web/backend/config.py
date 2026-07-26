@@ -12,6 +12,11 @@ UPLOAD_DIR = Path(os.environ.get("ACTIVITY_WEB_UPLOAD_DIR", RUNTIME_DIR / "uploa
 OUTPUT_DIR = Path(os.environ.get("ACTIVITY_WEB_OUTPUT_DIR", RUNTIME_DIR / "outputs"))
 ATTENDANCE_DIR = Path(os.environ.get("ACTIVITY_WEB_ATTENDANCE_DIR", RUNTIME_DIR / "attendance"))
 
+# Written by start_enrollment_session.py once the cloudflared tunnel is up,
+# so the running Flask process (a separate subprocess) can pick up the
+# public URL without a restart.
+TUNNEL_URL_PATH = RUNTIME_DIR / "tunnel_url.txt"
+
 # Allowed file types
 ALLOWED_EXTENSIONS = {".mp4", ".mov", ".avi", ".mkv", ".webm"}
 ALLOWED_IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".bmp"}

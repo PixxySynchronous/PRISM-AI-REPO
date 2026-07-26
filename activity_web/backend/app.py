@@ -21,6 +21,7 @@ from .config import (
     ATTENDANCE_DIR,
     ALLOWED_EXTENSIONS,
     ALLOWED_IMAGE_EXTENSIONS,
+    TUNNEL_URL_PATH,
 )
 from .startup import check_ffmpeg_available
 from .transcode import transcode_clips_async
@@ -103,6 +104,50 @@ def attendance_classrooms():
     })
 
 
+def _read_tunnel_url() -> str | None:
+    """The public tunnel URL, written by start_enrollment_session.py once
+    cloudflared reports it's connected. None if no session is running."""
+    try:
+        url = TUNNEL_URL_PATH.read_text(encoding="utf-8").strip()
+    except FileNotFoundError:
+        return None
+    return url or None
+
+
+@app.get("/api/enroll-url")
+def enroll_url():
+    classroom_id = request.args.get("classroom", "")
+    if (error := _require_classroom(classroom_id)) is not None:
+        return error
+    tunnel_url = _read_tunnel_url()
+    if not tunnel_url:
+        return jsonify({
+            "ok": False,
+            "error": "No enrollment session is running. Start it with start_enrollment_session.py on the teacher's laptop.",
+        }), 404
+    return jsonify({"ok": True, "url": f"{tunnel_url}/enroll?classroom={classroom_id}"})
+
+
+@app.get("/api/enroll-qr")
+def enroll_qr():
+    classroom_id = request.args.get("classroom", "")
+    if (error := _require_classroom(classroom_id)) is not None:
+        return error
+    tunnel_url = _read_tunnel_url()
+    if not tunnel_url:
+        return jsonify({"ok": False, "error": "No enrollment session is running."}), 404
+
+    import io
+    import qrcode
+
+    target = f"{tunnel_url}/enroll?classroom={classroom_id}"
+    img = qrcode.make(target, box_size=8, border=2)
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    buf.seek(0)
+    return send_file(buf, mimetype="image/png")
+
+
 @app.get("/api/health")
 def health():
     return jsonify({"ok": True})
@@ -153,6 +198,29 @@ def attendance_resolve_suspicious():
         result = service.resolve_suspicious_review(review_id, confirmed)
     except KeyError:
         return jsonify({"ok": False, "error": "That review no longer exists (already resolved?)."}), 404
+    except Exception as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 500
+
+    return jsonify({"ok": True, **result})
+
+
+@app.post("/api/attendance/unknown/assign")
+def attendance_assign_unknown():
+    data = request.get_json(silent=True) or {}
+    classroom_id = data.get("classroom", "")
+    if (error := _require_classroom(classroom_id)) is not None:
+        return error
+
+    review_id = str(data.get("review_id", "")).strip()
+    student_id = str(data.get("student_id", "")).strip()
+    if not review_id or not student_id:
+        return jsonify({"ok": False, "error": "Missing review_id or student_id."}), 400
+
+    service = get_attendance_service(classroom_id)
+    try:
+        result = service.assign_unknown_face(review_id, student_id)
+    except KeyError as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 404
     except Exception as exc:
         return jsonify({"ok": False, "error": str(exc)}), 500
 
@@ -241,26 +309,34 @@ def attendance_mark():
     if (error := _require_classroom(classroom_id)) is not None:
         return error
 
-    uploaded_file = request.files.get("photo")
-    if uploaded_file is None or not uploaded_file.filename:
-        return jsonify({"ok": False, "error": "Upload a classroom photo first."}), 400
+    # "photos" (plural) lets a teacher mark attendance from several photos of
+    # the same classroom in one go — someone missed or turned away in one
+    # shot may be clearly caught in another, so a student only needs to be
+    # confidently matched in ANY one of them to count as present.
+    uploaded_files = request.files.getlist("photos")
+    if not uploaded_files or not uploaded_files[0].filename:
+        return jsonify({"ok": False, "error": "Upload at least one classroom photo first."}), 400
 
-    if not allowed_media(uploaded_file.filename):
-        return jsonify({"ok": False, "error": "Use an image or video file for attendance marking."}), 400
+    for f in uploaded_files:
+        if not allowed_media(f.filename):
+            return jsonify({"ok": False, "error": f"'{f.filename}' isn't a supported image/video file."}), 400
 
     service = get_attendance_service(classroom_id)
-    photo_name = secure_filename(uploaded_file.filename)
-    photo_path = ATTENDANCE_DIR / "uploads" / f"{uuid.uuid4().hex[:12]}_{photo_name}"
-    photo_path.parent.mkdir(parents=True, exist_ok=True)
-    uploaded_file.save(photo_path)
+    photo_paths: list[Path] = []
+    upload_dir = ATTENDANCE_DIR / "uploads"
+    upload_dir.mkdir(parents=True, exist_ok=True)
+    for f in uploaded_files:
+        photo_name = secure_filename(f.filename)
+        photo_path = upload_dir / f"{uuid.uuid4().hex[:12]}_{photo_name}"
+        f.save(photo_path)
+        photo_paths.append(photo_path)
 
     try:
-        result = service.mark_attendance(photo_path)
+        result = service.mark_attendance_multi(photo_paths)
     except Exception as exc:
         traceback.print_exc()
         return jsonify({"ok": False, "error": str(exc)}), 500
 
-    result["marked_url"] = attendance_artifact_url(Path(result["marked_url"]).name)
     return jsonify({"ok": True, **result})
 
 
@@ -287,6 +363,7 @@ def attendance_demo():
         return jsonify({"ok": False, "error": str(exc)}), 500
 
     result["marked_url"] = attendance_artifact_url(Path(result["marked_url"]).name)
+    result["clean_url"] = attendance_artifact_url(Path(result["clean_url"]).name)
     return jsonify({"ok": True, **result})
 
 
@@ -699,4 +776,10 @@ def handle_unhandled_exception(exc):
 
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=8080, debug=True, use_reloader=False)
+    # threaded=True so a burst of concurrent enrollment uploads (e.g. a
+    # class scanning the QR code at once) get processed in parallel rather
+    # than queued one-at-a-time. debug=False because this is the entrypoint
+    # used when exposing the server via a public tunnel for QR enrollment —
+    # Werkzeug's interactive debugger is a real RCE risk on anything
+    # internet-reachable.
+    app.run(host="0.0.0.0", port=8080, debug=False, use_reloader=False, threaded=True)

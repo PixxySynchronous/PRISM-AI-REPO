@@ -194,6 +194,46 @@ h1 {
   color: var(--muted);
 }
 
+.enroll-qr-toggle {
+  margin-left: auto;
+  padding: 8px 16px;
+  border-radius: 12px;
+  border: 1.5px dashed rgba(37, 99, 235, 0.5);
+  background: rgba(37, 99, 235, 0.08);
+  color: #1d4ed8;
+  font-weight: 700;
+  font-size: 0.85rem;
+  cursor: pointer;
+  box-shadow: none;
+}
+.enroll-qr-toggle:hover { background: rgba(37, 99, 235, 0.15); }
+
+.enroll-qr-panel {
+  margin-bottom: 18px;
+  padding: 18px;
+  border-radius: 18px;
+  border: 1px solid var(--border);
+  background: rgba(255, 255, 255, 0.72);
+  text-align: center;
+}
+
+.enroll-qr-image {
+  width: 220px;
+  height: 220px;
+  image-rendering: pixelated;
+  border-radius: 12px;
+  background: #fff;
+  padding: 10px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.08);
+}
+
+.enroll-qr-link {
+  margin: 12px 0 4px;
+  font-family: monospace;
+  font-size: 0.85rem;
+  word-break: break-all;
+}
+
 .roster-classroom-label {
   font-size: 0.8rem;
   font-weight: 700;
@@ -275,6 +315,37 @@ h1 {
 .result-item.absent-item {
   border-color: rgba(120, 120, 120, 0.25);
   background: rgba(120, 120, 120, 0.06);
+}
+
+.present-item-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.show-face-btn {
+  margin-left: auto;
+  padding: 4px 10px;
+  border-radius: 10px;
+  font-size: 0.74rem;
+  font-weight: 700;
+  cursor: pointer;
+  border: 1.5px solid rgba(34, 197, 94, 0.4);
+  background: rgba(34, 197, 94, 0.1);
+  color: #15803d;
+  box-shadow: none;
+}
+.show-face-btn:hover { background: rgba(34, 197, 94, 0.18); }
+
+.face-reveal { margin-top: 8px; }
+
+.face-reveal img {
+  width: 96px;
+  height: 96px;
+  object-fit: cover;
+  border-radius: 12px;
+  display: block;
 }
 
 .suspicious-actions {
@@ -494,10 +565,31 @@ h1 {
   display: block;
 }
 
+.assign-face-select {
+  width: 100%;
+  padding: 5px 6px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  font-size: 0.72rem;
+  background: rgba(255, 255, 255, 0.9);
+}
+.assign-face-select:disabled { opacity: 0.5; }
+
 .unknown-face-card figcaption {
   font-size: 0.72rem;
   color: var(--muted);
   text-align: center;
+}
+
+.marked-photo-gallery {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 12px;
+  margin-bottom: 14px;
+}
+
+.marked-photo-gallery:has(.marked-photo-preview:only-child) {
+  grid-template-columns: 1fr;
 }
 
 .marked-photo-preview {

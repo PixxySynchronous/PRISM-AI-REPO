@@ -180,14 +180,15 @@ class AttendanceService:
 
     def _read_store(self) -> dict:
         if not self.store_path.exists():
-            return {"students": [], "attendance": [], "pending_reviews": []}
+            return {"students": [], "attendance": [], "pending_reviews": [], "pending_unknown_faces": []}
         try:
             data = json.loads(self.store_path.read_text())
         except Exception:
-            return {"students": [], "attendance": [], "pending_reviews": []}
+            return {"students": [], "attendance": [], "pending_reviews": [], "pending_unknown_faces": []}
         data.setdefault("students", [])
         data.setdefault("attendance", [])
         data.setdefault("pending_reviews", [])
+        data.setdefault("pending_unknown_faces", [])
         return data
 
     def _write_store(self, data: dict) -> None:
@@ -547,8 +548,10 @@ class AttendanceService:
             "updated_at": student.get("updated_at"),
         }
 
-    def match_student(self, embedding: np.ndarray) -> dict:
+    def match_student(self, embedding: np.ndarray, exclude_student_id: str | None = None) -> dict:
         students = self.list_students()
+        if exclude_student_id is not None:
+            students = [s for s in students if s.get("student_id") != exclude_student_id]
         if not students:
             return {"match": None, "similarity": -1.0}
 
@@ -606,9 +609,16 @@ class AttendanceService:
         mark_attendance. Confirming reinforces the model — the embedding that
         triggered the suspicious match gets added to that student's gallery,
         the same way a high-confidence classroom match already does — and
-        records the student as present. Rejecting just discards the pending
-        review; nothing is added anywhere, since a wrong name is worse to
-        learn from than a merely uncertain one."""
+        records the student as present.
+
+        Rejecting doesn't just discard the face — a wrong suggestion doesn't
+        mean the face has no identity, only that it isn't THIS student. The
+        embedding gets re-matched against the roster excluding the rejected
+        student, and lands wherever that re-match says: a confident hit
+        (>=PRESENT_SIMILARITY_THRESHOLD) becomes present, a borderline one
+        (still >=FACE_SIMILARITY_THRESHOLD) becomes a fresh suspicious entry
+        for the new candidate, and no remaining candidate at all drops it
+        into the unknown-faces pool (assignable from there)."""
         store = self._read_store()
         pending = store.get("pending_reviews", [])
 
@@ -616,6 +626,8 @@ class AttendanceService:
         if review is None:
             raise KeyError(f"No pending review: {review_id}")
         store["pending_reviews"] = [r for r in pending if r.get("review_id") != review_id]
+
+        result: dict = {"confirmed": confirmed, "student_name": review["student_name"]}
 
         if confirmed:
             embedding = np.asarray(review["embedding"], dtype=np.float32)
@@ -626,13 +638,101 @@ class AttendanceService:
                 "source": "classroom_photo_confirmed",
                 "confidence": review["similarity"],
             })
+            result["outcome"] = "present"
+        else:
+            embedding = np.asarray(review["embedding"], dtype=np.float32)
+            bbox = review.get("bbox")
+            photo_index = review.get("photo_index", 0)
+            rematch = self.match_student(embedding, exclude_student_id=review["student_id"])
+
+            if rematch["match"] is not None and rematch["similarity"] >= PRESENT_SIMILARITY_THRESHOLD:
+                new_student = rematch["match"]
+                if rematch["similarity"] >= 0.60:
+                    self._add_embedding_to_gallery(store, new_student["student_id"], embedding)
+                store["attendance"].append({
+                    "student_name": new_student["name"],
+                    "recognized_at": _now_iso(),
+                    "source": "classroom_photo_rematch",
+                    "confidence": round(float(rematch["similarity"]), 4),
+                })
+                result["outcome"] = "present"
+                result["new_match"] = {
+                    "student": new_student,
+                    "confidence": round(float(rematch["similarity"]), 4),
+                    "bbox": bbox,
+                    "photo_index": photo_index,
+                }
+            elif rematch["match"] is not None and rematch["similarity"] >= FACE_SIMILARITY_THRESHOLD:
+                new_review_id = uuid.uuid4().hex
+                store.setdefault("pending_reviews", []).append({
+                    "review_id": new_review_id,
+                    "student_id": rematch["match"]["student_id"],
+                    "student_name": rematch["match"]["name"],
+                    "similarity": round(float(rematch["similarity"]), 4),
+                    "embedding": review["embedding"],
+                    "bbox": bbox,
+                    "photo_index": photo_index,
+                    "created_at": _now_iso(),
+                })
+                result["outcome"] = "suspicious"
+                result["new_suspicious"] = {
+                    "review_id": new_review_id,
+                    "student": rematch["match"],
+                    "confidence": round(float(rematch["similarity"]), 4),
+                    "bbox": bbox,
+                    "photo_index": photo_index,
+                }
+            else:
+                new_review_id = uuid.uuid4().hex
+                store.setdefault("pending_unknown_faces", []).append({
+                    "review_id": new_review_id,
+                    "embedding": review["embedding"],
+                    "bbox": bbox,
+                    "photo_index": photo_index,
+                    "created_at": _now_iso(),
+                })
+                result["outcome"] = "unknown"
+                result["new_unknown"] = {
+                    "review_id": new_review_id,
+                    "similarity": round(float(rematch["similarity"]), 4) if rematch["match"] else -1.0,
+                    "bbox": bbox,
+                    "photo_index": photo_index,
+                }
 
         self._write_store(store)
-        return {
-            "confirmed": confirmed,
-            "student_name": review["student_name"],
-            "roster": self.list_students(),
-        }
+        result["roster"] = self.list_students()
+        return result
+
+    def assign_unknown_face(self, review_id: str, student_id: str) -> dict:
+        """A teacher identifying an 'Unknown' face crop (below the match
+        threshold entirely) as a specific enrolled student. Unlike a
+        suspicious-match confirmation, there's no name attached yet — the
+        teacher is supplying it — so this both reinforces that student's
+        gallery with the embedding and marks them present, since a teacher
+        pointing at a photo and naming someone is direct evidence they were
+        there."""
+        store = self._read_store()
+        pending = store.get("pending_unknown_faces", [])
+
+        entry = next((f for f in pending if f.get("review_id") == review_id), None)
+        if entry is None:
+            raise KeyError(f"No pending unknown face: {review_id}")
+        store["pending_unknown_faces"] = [f for f in pending if f.get("review_id") != review_id]
+
+        student = next((s for s in store.get("students", []) if s.get("student_id") == student_id), None)
+        if student is None:
+            raise KeyError(f"No such student: {student_id}")
+
+        embedding = np.asarray(entry["embedding"], dtype=np.float32)
+        self._add_embedding_to_gallery(store, student_id, embedding)
+        store["attendance"].append({
+            "student_name": student["name"],
+            "recognized_at": _now_iso(),
+            "source": "unknown_face_assigned",
+        })
+
+        self._write_store(store)
+        return {"student_name": student["name"], "roster": self.list_students()}
 
     def mark_attendance(self, media_path: Path) -> dict:
         if not media_path.exists():
@@ -718,6 +818,8 @@ class AttendanceService:
                             "student_name": student["name"],
                             "similarity": round(float(similarity), 4),
                             "embedding": _normalize(det.embedding).tolist(),
+                            "bbox": [x1, y1, x2, y2],
+                            "photo_index": 0,
                             "created_at": _now_iso(),
                         })
                         entry["review_id"] = review_id
@@ -727,9 +829,16 @@ class AttendanceService:
                 color = (0, 0, 255)
                 sim = match["similarity"]
                 label = f"Unknown {sim:.2f}"
+                review_id = uuid.uuid4().hex
+                store.setdefault("pending_unknown_faces", []).append({
+                    "review_id": review_id,
+                    "embedding": _normalize(det.embedding).tolist(),
+                    "created_at": _now_iso(),
+                })
                 unknown_faces_detail.append({
                     "bbox": [x1, y1, x2, y2],
                     "similarity": round(float(sim), 4),
+                    "review_id": review_id,
                 })
 
             cv2.rectangle(marked_frame, (x1, y1), (x2, y2), color, 2)
@@ -753,6 +862,14 @@ class AttendanceService:
         marked_path = MARKED_DIR / marked_name
         cv2.imwrite(str(marked_path), marked_frame)
 
+        # Also save the pre-annotation frame — the frontend crops individual
+        # faces (Present "Show face", unknown-faces grid) from this instead
+        # of the boxed/labelled image, so the revealed face isn't covered by
+        # a bounding-box border or confidence text.
+        clean_name = f"{media_path.stem}_clean.jpg"
+        clean_path = MARKED_DIR / clean_name
+        cv2.imwrite(str(clean_path), frame)
+
         return {
             "present": present,
             "suspicious": suspicious,
@@ -761,6 +878,170 @@ class AttendanceService:
             "unknown_faces_detail": unknown_faces_detail,
             "marked_path": str(marked_path),
             "marked_url": f"/api/attendance/artifacts/{marked_name}",
+            "clean_path": str(clean_path),
+            "clean_url": f"/api/attendance/artifacts/{clean_name}",
+            "roster": self.list_students(),
+        }
+
+    def mark_attendance_multi(self, media_paths: list[Path]) -> dict:
+        """Same idea as mark_attendance, but across several photos of the
+        same classroom taken back to back (different angles/moments catch
+        people a single photo misses — someone turned away or blocked in
+        one shot may be clearly visible in another). A student is Present/
+        Suspicious based on their single BEST match across all the photos,
+        not per-photo — so being missed in one photo doesn't hurt them if
+        they were caught clearly in another. Absent = never matched (at
+        either tier) in any of the photos."""
+        if not media_paths:
+            raise ValueError("No photos provided")
+
+        store = self._read_store()
+        attendance_log = store["attendance"]
+
+        best_by_student: dict[str, dict] = {}
+        seen_any_student_ids: set[str] = set()
+        unknown_faces = 0
+        unknown_faces_detail: list[dict] = []
+        photos_out: list[dict] = []
+
+        for photo_index, media_path in enumerate(media_paths):
+            if not media_path.exists():
+                raise FileNotFoundError(f"File not found: {media_path}")
+
+            suffix = media_path.suffix.lower()
+            if suffix in {".jpg", ".jpeg", ".png", ".webp", ".bmp"}:
+                frame = self._load_image(media_path)
+                if frame is None:
+                    raise RuntimeError(f"Could not read classroom photo: {media_path.name}")
+            else:
+                frames = self._sample_video_frames(media_path)
+                if not frames:
+                    raise RuntimeError(f"Could not read classroom video: {media_path.name}")
+                frame = frames[0]
+
+            detections = self._detect_samples(frame)
+            marked_frame = frame.copy()
+            all_matches = [(det, self.match_student(det.embedding)) for det in detections]
+
+            best_per_student_this_photo: dict[str, tuple] = {}
+            for det, match in all_matches:
+                if match["match"] is not None:
+                    name = match["match"]["name"]
+                    if name not in best_per_student_this_photo or match["similarity"] > best_per_student_this_photo[name][1]:
+                        best_per_student_this_photo[name] = (det, match["similarity"], match)
+            best_det_ids = {id(det) for det, _, _ in best_per_student_this_photo.values()}
+
+            for det, match in all_matches:
+                x1, y1, x2, y2 = det.bbox
+                is_best = match["match"] is not None and id(det) in best_det_ids
+
+                if is_best:
+                    student = match["match"]
+                    similarity = float(match["similarity"])
+                    is_present = similarity >= PRESENT_SIMILARITY_THRESHOLD
+                    color = (0, 200, 0) if is_present else (0, 165, 255)
+                    tag = "" if is_present else " (suspicious)"
+                    label = f"{student['name']} {similarity:.2f}{tag}"
+
+                    sid = student["student_id"]
+                    seen_any_student_ids.add(sid)
+                    if sid not in best_by_student or similarity > best_by_student[sid]["similarity"]:
+                        best_by_student[sid] = {
+                            "student": student,
+                            "similarity": similarity,
+                            "bbox": [x1, y1, x2, y2],
+                            "photo_index": photo_index,
+                            "embedding": det.embedding,
+                        }
+                else:
+                    unknown_faces += 1
+                    color = (0, 0, 255)
+                    sim = match["similarity"]
+                    label = f"Unknown {sim:.2f}"
+                    review_id = uuid.uuid4().hex
+                    store.setdefault("pending_unknown_faces", []).append({
+                        "review_id": review_id,
+                        "embedding": _normalize(det.embedding).tolist(),
+                        "created_at": _now_iso(),
+                    })
+                    unknown_faces_detail.append({
+                        "bbox": [x1, y1, x2, y2],
+                        "similarity": round(float(sim), 4),
+                        "photo_index": photo_index,
+                        "review_id": review_id,
+                    })
+
+                cv2.rectangle(marked_frame, (x1, y1), (x2, y2), color, 2)
+                cv2.putText(
+                    marked_frame, label,
+                    (x1, max(20, y1 - 8)),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.55, color, 2, cv2.LINE_AA,
+                )
+
+            marked_name = f"{media_path.stem}_marked.jpg"
+            marked_path = MARKED_DIR / marked_name
+            cv2.imwrite(str(marked_path), marked_frame)
+
+            clean_name = f"{media_path.stem}_clean.jpg"
+            clean_path = MARKED_DIR / clean_name
+            cv2.imwrite(str(clean_path), frame)
+
+            photos_out.append({
+                "marked_url": f"/api/attendance/artifacts/{marked_name}",
+                "clean_url": f"/api/attendance/artifacts/{clean_name}",
+            })
+
+        present: list[dict] = []
+        suspicious: list[dict] = []
+        for info in best_by_student.values():
+            student = info["student"]
+            similarity = info["similarity"]
+            entry = {
+                "student": student,
+                "confidence": round(similarity, 4),
+                "bbox": info["bbox"],
+                "photo_index": info["photo_index"],
+            }
+            if similarity >= PRESENT_SIMILARITY_THRESHOLD:
+                present.append(entry)
+                attendance_log.append({
+                    "student_name": student["name"],
+                    "recognized_at": _now_iso(),
+                    "source": "classroom_photo",
+                    "confidence": round(similarity, 4),
+                })
+                if similarity >= 0.60:
+                    self._add_embedding_to_gallery(store, student["student_id"], info["embedding"])
+            else:
+                review_id = uuid.uuid4().hex
+                store.setdefault("pending_reviews", []).append({
+                    "review_id": review_id,
+                    "student_id": student["student_id"],
+                    "student_name": student["name"],
+                    "similarity": round(similarity, 4),
+                    "embedding": _normalize(info["embedding"]).tolist(),
+                    "bbox": info["bbox"],
+                    "photo_index": info["photo_index"],
+                    "created_at": _now_iso(),
+                })
+                entry["review_id"] = review_id
+                suspicious.append(entry)
+
+        absent = [
+            self._student_public(s) for s in store.get("students", [])
+            if s.get("student_id") not in seen_any_student_ids
+        ]
+
+        store["attendance"] = attendance_log
+        self._write_store(store)
+
+        return {
+            "present": present,
+            "suspicious": suspicious,
+            "absent": absent,
+            "unknown_faces": unknown_faces,
+            "unknown_faces_detail": unknown_faces_detail,
+            "photos": photos_out,
             "roster": self.list_students(),
         }
 

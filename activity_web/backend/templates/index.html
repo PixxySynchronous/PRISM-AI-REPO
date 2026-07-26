@@ -31,19 +31,24 @@
               Classroom
               <select id="classroom-select"></select>
             </label>
+            <button id="enroll-qr-toggle" type="button" class="enroll-qr-toggle">Show enrollment QR</button>
+          </div>
+
+          <div id="enroll-qr-panel" class="enroll-qr-panel hidden">
+            <div id="enroll-qr-body"></div>
           </div>
 
           <div class="attendance-grid">
             <article class="attendance-card attendance-card-wide">
               <div class="attendance-card-header">
                 <h2>Mark attendance</h2>
-                <p>Upload a classroom photo and match all detected faces against the enrolled roster.</p>
+                <p>Upload one or more classroom photos — a student only needs to be clearly caught in any one of them to count as present. Faces are matched against the enrolled roster.</p>
               </div>
 
               <form id="mark-form" class="stack-form">
                 <label class="file-drop file-drop-compact">
-                  <input id="classroom-photo-input" name="photo" type="file" accept="image/*,video/*" required />
-                  <span id="classroom-photo-label">Choose a classroom photo</span>
+                  <input id="classroom-photo-input" name="photos" type="file" accept="image/*,video/*" multiple required />
+                  <span id="classroom-photo-label">Choose one or more classroom photos</span>
                 </label>
 
                 <button type="submit">Mark attendance</button>
@@ -56,7 +61,7 @@
 
               <div id="mark-status" class="status">Ready to mark attendance.</div>
               <div id="mark-result" class="attendance-result hidden">
-                <img id="marked-photo-preview" class="marked-photo-preview" alt="Marked classroom photo" />
+                <div id="marked-photo-gallery" class="marked-photo-gallery"></div>
                 <div class="attendance-buckets">
                   <div class="attendance-bucket">
                     <div id="present-list" class="result-list"></div>

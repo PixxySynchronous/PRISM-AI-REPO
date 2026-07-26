@@ -18,6 +18,7 @@
 
 const CameraRecorder = (() => {
   const DEFAULT_SCRIPT = [
+    { text: "Hold your phone at arm's length, so your whole face fits inside the oval", seconds: 5 },
     { text: "Look straight at the camera", seconds: 10 },
     { text: "Slowly turn your head to the left", seconds: 8 },
     { text: "Slowly turn your head to the right", seconds: 8 },
@@ -73,7 +74,14 @@ const CameraRecorder = (() => {
 
     async function startCamera() {
       try {
-        stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
+        // Explicit resolution request — without this, some phones default to
+        // a low capture resolution (observed as low as 480x640), which combined
+        // with a face filling most of the frame gives the detector very little
+        // to work with. "ideal" degrades gracefully on cameras that can't hit it.
+        stream = await navigator.mediaDevices.getUserMedia({
+          video: { width: { ideal: 1280 }, height: { ideal: 720 } },
+          audio: false,
+        });
       } catch (err) {
         statusEl.textContent = "Couldn't access the camera: " + err.message;
         return;
