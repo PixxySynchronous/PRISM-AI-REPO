@@ -647,8 +647,6 @@ class AttendanceService:
 
             if rematch["match"] is not None and rematch["similarity"] >= PRESENT_SIMILARITY_THRESHOLD:
                 new_student = rematch["match"]
-                if rematch["similarity"] >= 0.60:
-                    self._add_embedding_to_gallery(store, new_student["student_id"], embedding)
                 store["attendance"].append({
                     "student_name": new_student["name"],
                     "recognized_at": _now_iso(),
@@ -801,10 +799,6 @@ class AttendanceService:
                             "source": "classroom_photo",
                             "confidence": round(float(similarity), 4),
                         })
-                        # Incremental gallery growth: high-confidence classroom embeddings
-                        # are added to the student's gallery so future matches improve.
-                        if similarity >= 0.60:
-                            self._add_embedding_to_gallery(store, student["student_id"], det.embedding)
                     else:
                         # Hold the embedding behind a review_id rather than acting on
                         # it now — a teacher confirming/rejecting it is what decides
@@ -1010,8 +1004,6 @@ class AttendanceService:
                     "source": "classroom_photo",
                     "confidence": round(similarity, 4),
                 })
-                if similarity >= 0.60:
-                    self._add_embedding_to_gallery(store, student["student_id"], info["embedding"])
             else:
                 review_id = uuid.uuid4().hex
                 store.setdefault("pending_reviews", []).append({

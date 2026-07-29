@@ -52,19 +52,22 @@ python start_enrollment_session.py
 
 This starts the Flask app (threaded, so a burst of students enrolling at once doesn't serialize into a queue) and the tunnel together, and prints the public URL once it's live. Requires `cloudflared` installed once (`brew install cloudflared` on macOS). The tunnel is ephemeral — a fresh random URL every time the script (re)starts, and it self-heals if the tunnel reconnects mid-session with a new hostname.
 
+On a hosted deployment (e.g. the Hugging Face Space) there's no tunnel to run — the QR code falls back to the Space's own public URL automatically, since it's already internet-reachable. No `start_enrollment_session.py` needed there; `localhost` is the only host this fallback refuses to use, since that's never reachable from a student's phone.
+
 ### How attendance marking works
 1. Upload **one or more** classroom photos at once — a student only needs to be clearly caught in *any one* of them to count present, so someone missed or turned away in one shot can still be caught by another.
 2. Every detected face across all photos is matched by cosine similarity against every enrolled student's prototype and individual stored embeddings; each student's *best* match across all photos wins.
 3. Three-tier result:
    - **< 0.28** similarity → no name candidate at all → **Unknown** (red box).
    - **0.28–0.30** → a real candidate, not confident enough to auto-confirm → **Suspicious** (amber box, for a teacher to review).
-   - **≥ 0.30** → **Present** (green box). Confidence ≥ 0.60 also auto-grows that student's gallery.
+   - **≥ 0.30** → **Present** (green box).
    - Anyone enrolled but not matched at either tier → **Absent**.
 4. Face crops (Present, Suspicious, and Unknown) stay hidden by default and reveal on demand via a **"Show face"** button, cropped from the pre-annotation photo so the reveal isn't obscured by a box/label.
 
 ### Reinforcement — teachers correcting the model
+Gallery growth only ever happens from an explicit teacher action — never automatically just because a photo scored a high confidence. (An earlier version auto-added any ≥0.60 Present match; that meant re-testing with the same handful of demo photos silently folded them into the gallery, so a second run compared a photo against an embedding derived from itself — inflated, unrealistic-looking confidence and ballooning embedding counts for no real reason.)
 - **Confirming** a Suspicious match adds that embedding to the student's gallery and marks them present.
-- **Rejecting** a Suspicious match doesn't just discard it — the same face gets re-matched against the roster *excluding* the rejected student, and lands wherever that turns up: a confident hit → straight to Present, a borderline one → a fresh Suspicious entry for the new candidate, nothing left → into the Unknown pool. The wrongly-suggested student drops to Absent unless already seen elsewhere in the same result.
+- **Rejecting** a Suspicious match doesn't just discard it — the same face gets re-matched against the roster *excluding* the rejected student, and lands wherever that turns up: a confident hit → straight to Present, a borderline one → a fresh Suspicious entry for the new candidate, nothing left → into the Unknown pool. The wrongly-suggested student drops to Absent unless already seen elsewhere in the same result. (This rematch itself doesn't auto-grow the gallery either.)
 - **Unknown faces** can be directly assigned to any enrolled student via a dropdown on each face card — reinforces that student's gallery and marks them present, since a teacher pointing at a photo and naming someone is direct evidence they were there.
 
 ---

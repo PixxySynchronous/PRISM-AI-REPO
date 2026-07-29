@@ -114,18 +114,40 @@ def _read_tunnel_url() -> str | None:
     return url or None
 
 
+def _public_base_url() -> str | None:
+    """Where students should be sent to self-enroll. Prefers the cloudflared
+    tunnel (for a locally-run server that isn't otherwise internet-reachable),
+    but falls back to the incoming request's own host — a hosted deployment
+    (e.g. a Hugging Face Space) is already on a public URL, so no tunnel is
+    needed there at all. localhost/127.0.0.1 is never used as a fallback: a
+    student's phone can't reach that regardless of what the teacher's own
+    browser shows."""
+    tunnel_url = _read_tunnel_url()
+    if tunnel_url:
+        return tunnel_url
+    host = request.host.split(":")[0].lower()
+    if host in {"localhost", "127.0.0.1", "0.0.0.0"}:
+        return None
+    # Hosted platforms (e.g. a Hugging Face Space) sit behind a reverse proxy
+    # that terminates HTTPS — Flask sees the forwarded plain-HTTP request
+    # unless told otherwise. Camera access requires a secure context, so the
+    # scheme has to reflect what the student's browser actually used.
+    scheme = request.headers.get("X-Forwarded-Proto", request.scheme)
+    return f"{scheme}://{request.host}"
+
+
 @app.get("/api/enroll-url")
 def enroll_url():
     classroom_id = request.args.get("classroom", "")
     if (error := _require_classroom(classroom_id)) is not None:
         return error
-    tunnel_url = _read_tunnel_url()
-    if not tunnel_url:
+    base_url = _public_base_url()
+    if not base_url:
         return jsonify({
             "ok": False,
             "error": "No enrollment session is running. Start it with start_enrollment_session.py on the teacher's laptop.",
         }), 404
-    return jsonify({"ok": True, "url": f"{tunnel_url}/enroll?classroom={classroom_id}"})
+    return jsonify({"ok": True, "url": f"{base_url}/enroll?classroom={classroom_id}"})
 
 
 @app.get("/api/enroll-qr")
@@ -133,14 +155,14 @@ def enroll_qr():
     classroom_id = request.args.get("classroom", "")
     if (error := _require_classroom(classroom_id)) is not None:
         return error
-    tunnel_url = _read_tunnel_url()
-    if not tunnel_url:
+    base_url = _public_base_url()
+    if not base_url:
         return jsonify({"ok": False, "error": "No enrollment session is running."}), 404
 
     import io
     import qrcode
 
-    target = f"{tunnel_url}/enroll?classroom={classroom_id}"
+    target = f"{base_url}/enroll?classroom={classroom_id}"
     img = qrcode.make(target, box_size=8, border=2)
     buf = io.BytesIO()
     img.save(buf, format="PNG")
